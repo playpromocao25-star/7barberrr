@@ -635,90 +635,89 @@ async function sendNotification(text){
   return {ok:false, reason:'no-channel'};
 }
 
-/* ============ BROWSER POP-UP NOTIFICATIONS ============ */
-async function getSeenBookingKeys(){
+/* ============ PUSH NOTIFICATIONS DE VERDADE ============
+   Diferente da versão antiga (que precisava da aba do site aberta),
+   isso usa Service Worker + Web Push: o pop-up chega mesmo com o
+   navegador fechado, direto do sistema operacional — igual notificação
+   de app de celular. Só quem clicar em "Ativar" no painel admin recebe;
+   visitantes comuns do site nunca veem nada disso. */
+
+const VAPID_PUBLIC_KEY = 'BILJgp1oZkw4cj3tXoUl1Cx6eIMSt6WbutBJGORkTLmARRyktuNR7teWi8nGegIqx7o7d87FZeJTLF1_TsnuL2E';
+
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for(let i=0; i<rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+async function ensureServiceWorker(){
+  if(!('serviceWorker' in navigator)) return null;
   try{
-    const res = await window.storage.get('browser-notify-seen', false);
-    return res ? JSON.parse(res.value) : null;
+    return await navigator.serviceWorker.register('sw.js');
   }catch(e){
+    console.warn('Falha ao registrar service worker', e);
     return null;
   }
 }
-async function saveSeenBookingKeys(arr){
-  await window.storage.set('browser-notify-seen', JSON.stringify(arr), false);
-}
 
-let bookingWatcherInterval = null;
-const WATCH_DAYS_AHEAD = 21;
-const WATCH_POLL_MS = 30000;
-
-async function startBookingWatcher(){
-  if(bookingWatcherInterval) return; // already running
-  await pollBookings(); // baseline pass — records current bookings without notifying
-  bookingWatcherInterval = setInterval(pollBookings, WATCH_POLL_MS);
-}
-
-async function pollBookings(){
-  let seen = await getSeenBookingKeys();
-  const isFirstRun = seen === null;
-  if(isFirstRun) seen = [];
-  const seenSet = new Set(seen);
-  const days = nextDays(WATCH_DAYS_AHEAD);
-  const results = await Promise.all(days.map(d => getDay(toISO(d)).then(data => ({iso: toISO(d), data}))));
-  const newOnes = [];
-  for(const {iso, data} of results){
-    const bookings = data.bookings || {};
-    for(const time of Object.keys(bookings)){
-      const key = iso + '|' + time;
-      if(!seenSet.has(key)){
-        seenSet.add(key);
-        if(!isFirstRun){ newOnes.push({iso, time, booking: bookings[time]}); }
-      }
-    }
-  }
-  await saveSeenBookingKeys(Array.from(seenSet));
-  newOnes.forEach(({iso, time, booking}) => fireBrowserNotification(iso, time, booking));
-}
-
-function fireBrowserNotification(iso, time, booking){
-  if(!('Notification' in window) || Notification.permission !== 'granted') return;
-  const title = '💈 Novo agendamento — mais uma venda!';
-  const body = booking.serviceName + ' — ' + money(booking.price) + '\n' +
-               fmtDateFull(iso) + ' às ' + time + '\n' +
-               'Cliente: ' + booking.name;
-  try{
-    const n = new Notification(title, { body: body, icon: LOGO_DATA_URI, tag: iso+time });
-    n.onclick = () => { window.focus(); n.close(); };
-  }catch(e){
-    console.warn('Falha ao exibir notificação do navegador', e);
-  }
+/* Registra o service worker cedo (sem pedir permissão ainda) pra já
+   deixar pronto pra quando o admin clicar em ativar. */
+if('serviceWorker' in navigator){
+  ensureServiceWorker();
 }
 
 async function enableBrowserNotify(){
-  if(!('Notification' in window)){
-    showToast('Este navegador não suporta notificações.');
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
+    showToast('Este navegador não suporta notificações push.');
     return;
   }
   const perm = await Notification.requestPermission();
   state.browserNotifyPermission = perm;
-  if(perm==='granted'){
-    showToast('Pop-ups ativados! Deixe esta aba aberta no navegador.');
-    await startBookingWatcher();
-  } else {
+  if(perm !== 'granted'){
     showToast('Permissão não concedida pelo navegador.');
+    render();
+    return;
+  }
+  try{
+    const reg = await ensureServiceWorker();
+    if(!reg){ showToast('Não foi possível registrar o service worker.'); render(); return; }
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+    if(_DB.cloudEnabled() && _Cloud.client){
+      await _Cloud.client.from('push_subscriptions').upsert(
+        { endpoint: sub.endpoint, subscription: sub.toJSON() },
+        { onConflict: 'endpoint' }
+      );
+    }
+    showToast('Notificações ativadas! Vão chegar mesmo com o site fechado.');
+  }catch(e){
+    console.error('Falha ao ativar push:', e);
+    showToast('Falha ao ativar notificações push.');
   }
   render();
 }
 
-function testBrowserNotify(){
-  if(!('Notification' in window) || Notification.permission!=='granted'){
-    showToast('Ative os pop-ups primeiro.');
+async function testBrowserNotify(){
+  if(Notification.permission !== 'granted'){
+    showToast('Ative as notificações primeiro.');
     return;
   }
-  fireBrowserNotification(state.selectedDate || toISO(new Date()), '00:00', {
-    serviceName:'Corte (teste)', price:25, name:'Cliente Teste'
+  const reg = await ensureServiceWorker();
+  if(!reg){ showToast('Ative as notificações primeiro.'); return; }
+  reg.showNotification('💈 Novo agendamento — mais uma venda!', {
+    body: 'Corte (teste) — ' + money(25) + '\n' + fmtDateFull(state.selectedDate || toISO(new Date())) + ' às 00:00\nCliente: Cliente Teste',
+    tag: 'teste-push',
+    requireInteraction: true
   });
-  showToast('Pop-up de teste enviado.');
+  showToast('Pop-up de teste enviado (esse é só local — o de agendamento real passa pelo servidor).');
 }
 
 /* ============ STATE ============ */
@@ -784,18 +783,20 @@ async function init(){
       if(cloud){
         const cloudDays = Object.keys(cloud.days||{}).length;
         const cloudServices = (cloud.services||[]).length;
-        // Se a nuvem tem mais dados que o local, pergunta se quer usar a versão da nuvem
+        // A nuvem é a fonte de verdade compartilhada por todo mundo que abre o
+        // site (clientes agendando + admin). Por isso, NUNCA perguntamos nada
+        // aqui com confirm() — isso aparecia pra qualquer visitante do site,
+        // o que estava errado. Se a nuvem tem dados, só trazemos silenciosamente.
         if(cloudDays > 0 && (cloudDays > localDays || cloudServices > localServices)){
-          // Mescla: prefere dados da nuvem (mais recentes provavelmente)
-          if(confirm('Encontrei ' + cloudDays + ' dia(s) e ' + cloudServices + ' serviço(s) na nuvem. Trazer pra cá?')){
-            await _DB.importAll({schema:'7barber-backup', version:1, ...cloud});
-            state.services = await getServices();
-            state.notifySettings = await getNotifySettings();
-            await loadClientDay(state.selectedDate);
-          }
+          await _DB.importAll({schema:'7barber-backup', version:1, ...cloud});
+          state.services = await getServices();
+          state.notifySettings = await getNotifySettings();
+          await loadClientDay(state.selectedDate);
         }
-        // Se o local tem mais que a nuvem, faz um push
-        else if(localDays > 0 || localServices > 0){
+        // Se o local tem mais que a nuvem, faz um push — mas só quando for o
+        // painel do admin fazendo isso (visitante comum nunca deveria escrever
+        // dados "de dono" na nuvem).
+        else if((localDays > 0 || localServices > 0) && state.adminUnlocked){
           await doCloudPushSilent();
         }
       }
@@ -805,9 +806,6 @@ async function init(){
   }
   await loadClientDay(state.selectedDate);
   render();
-  if(typeof Notification !== 'undefined' && Notification.permission==='granted'){
-    startBookingWatcher();
-  }
 }
 
 async function doCloudPushSilent(){
@@ -1028,12 +1026,12 @@ function renderAdminNotify(){
   const bp = state.browserNotifyPermission;
 
   return `
-    <div class="section-label">Pop-up no navegador</div>
+    <div class="section-label">Pop-up no navegador/celular</div>
     <div class="empty-note" style="text-align:left; line-height:1.65;">
-      Além do Telegram/WhatsApp, o navegador pode mostrar um pop-up assim que alguém agendar — funciona mesmo com a aba em segundo plano, mas <strong>só enquanto este site estiver aberto em alguma aba do navegador</strong> (se fechar tudo, para de avisar).
+      Ative aqui neste dispositivo pra receber um pop-up de notificação assim que alguém agendar — <strong>funciona mesmo com o site fechado</strong>, igual notificação de aplicativo (pode estar no Instagram, por exemplo, e o aviso aparece assim mesmo). Só quem ativar aqui recebe; visitantes do site não veem nada disso. Ative em cada dispositivo/navegador que você quiser que avise (ex: celular e computador).
     </div>
     ${bp==='granted' ? `
-      <div class="empty-note" style="text-align:left; margin-top:10px;">🟢 Pop-ups ativados neste navegador.</div>
+      <div class="empty-note" style="text-align:left; margin-top:10px;">🟢 Pop-ups ativados neste dispositivo.</div>
       <button class="btn-ghost" data-action="test-browser-notify">Enviar pop-up de teste</button>
     ` : bp==='denied' ? `
       <div class="empty-note" style="text-align:left; margin-top:10px; color:var(--danger);">🔴 Bloqueado nas configurações do navegador. Procure pelo ícone de cadeado na barra de endereço para permitir notificações deste site.</div>
@@ -1569,6 +1567,21 @@ async function confirmBooking(){
     fmtDateFull(state.selectedDate) + ' às ' + state.selectedTime + '\n' +
     'Cliente: ' + state.form.name.trim() + ' — ' + state.form.phone.trim();
   sendNotification(notifyText);
+
+  // Dispara o pop-up push (chega no navegador do admin mesmo fechado).
+  // Insere um evento na nuvem; um Database Webhook do Supabase escuta
+  // essa tabela e chama a Edge Function que manda a notificação real.
+  if(_DB.cloudEnabled() && _Cloud.client){
+    _Cloud.client.from('booking_events').insert({
+      iso: state.selectedDate,
+      time: state.selectedTime,
+      service_name: svc.name,
+      price: svc.price,
+      client_name: state.form.name.trim()
+    }).then(({error}) => {
+      if(error) console.warn('Falha ao registrar evento de push:', error);
+    });
+  }
 }
 
 async function toggleSlot(time){
