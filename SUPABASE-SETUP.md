@@ -156,3 +156,98 @@ create policy "public write settings" on settings for all using (true) with chec
 > ⚠️ As policies acima liberam leitura/escrita pública. Pra uma barbearia
 > com agendamentos isso é OK, mas se quiser restringir mais (por exemplo,
 > só a aba admin pode escrever), é só me avisar que eu ajusto.
+
+---
+
+# 🔔 Como ativar o pop-up de notificação de verdade (funciona com o site fechado)
+
+Isso é diferente do pop-up antigo: antes, pra o navegador avisar de um novo
+agendamento, você precisava deixar a aba do site aberta. Agora, com Web Push,
+o aviso chega **mesmo com o navegador fechado** — parecido com notificação de
+aplicativo de celular. E só chega pra quem clicar em "Ativar" no painel —
+os clientes que agendam nunca veem nada disso.
+
+Pra isso funcionar tem duas partes: **1)** o navegador do admin se inscreve
+pra receber push (isso já está pronto no app, aba Notificações → "Ativar
+pop-up de novo agendamento") e **2)** um "mensageiro" no servidor que
+efetivamente dispara o push quando alguém agenda — isso é a Edge Function
+abaixo, que precisa ser publicada uma vez no Supabase.
+
+## 1) Rodar o SQL das tabelas de push
+
+Se você já rodou o `supabase-schema.sql` atualizado (que já inclui as
+tabelas `push_subscriptions` e `booking_events`), pode pular esse passo.
+Senão, volte no **SQL Editor** e rode o arquivo `supabase-schema.sql` de
+novo — é seguro rodar mais de uma vez.
+
+## 2) Instalar a Supabase CLI (uma vez, no seu computador)
+
+```bash
+npm install -g supabase
+supabase login
+```
+
+## 3) Publicar a Edge Function `send-push`
+
+Na pasta do projeto (onde está a pasta `supabase/`):
+
+```bash
+supabase link --project-ref SEU_PROJECT_REF
+supabase functions deploy send-push
+```
+
+O `SEU_PROJECT_REF` é o pedaço do meio da sua URL do Supabase
+(`https://SEU_PROJECT_REF.supabase.co`).
+
+## 4) Configurar as chaves VAPID (identidade do seu "servidor de push")
+
+Já gerei um par de chaves pra você usar. Configure como *secret* da função:
+
+```bash
+supabase secrets set VAPID_PUBLIC_KEY=BILJgp1oZkw4cj3tXoUl1Cx6eIMSt6WbutBJGORkTLmARRyktuNR7teWi8nGegIqx7o7d87FZeJTLF1_TsnuL2E
+supabase secrets set VAPID_PRIVATE_KEY=ZDUheWB3p9dRC9IzspI4iInckBAMNNltSqWRAsjABOo
+supabase secrets set VAPID_SUBJECT=mailto:seuemail@exemplo.com
+```
+
+> A chave pública (`VAPID_PUBLIC_KEY`) também está escrita no `index.html`
+> (constante `VAPID_PUBLIC_KEY`) — as duas precisam ser sempre o mesmo par.
+> Se quiser gerar seu próprio par (recomendado por segurança, já que essas
+> aqui ficaram visíveis nesta conversa), rode `npx web-push generate-vapid-keys`
+> e troque nos dois lugares.
+
+## 5) Criar o Database Webhook (o "gatilho")
+
+1. No painel do Supabase, vá em **Database → Webhooks**
+2. Clique em **Create a new hook**
+3. Preencha:
+   - **Name**: `notify-new-booking`
+   - **Table**: `booking_events`
+   - **Events**: marque só **Insert**
+   - **Type**: `Supabase Edge Functions`
+   - **Edge Function**: selecione `send-push`
+4. Salve
+
+Pronto — a partir de agora, todo novo agendamento insere uma linha em
+`booking_events`, o webhook dispara a função `send-push`, e ela manda o
+pop-up pra todo dispositivo inscrito em `push_subscriptions`.
+
+## 6) Ativar no navegador/celular do admin
+
+1. Abra o site, entre no **Painel do administrador**
+2. Aba **Notificações** → clique em **Ativar pop-up de novo agendamento**
+3. Aceite a permissão que o navegador pedir
+4. Repita em cada dispositivo que você quiser que avise (ex: seu celular e
+   seu computador — cada um se inscreve separadamente)
+
+Pra testar sem esperar um agendamento de verdade, use o botão **Enviar
+pop-up de teste** (esse teste é só local, pra confirmar que a permissão e o
+service worker estão funcionando — não passa pela Edge Function).
+
+### Limitações a saber
+- No **iPhone (Safari)**, push só funciona se o site for **adicionado à
+  tela de início** ("Adicionar à Tela de Início") — Safari normal (aba do
+  navegador) não recebe push em segundo plano por regra da Apple.
+- Em Android/Chrome e em qualquer desktop (Chrome, Edge, Firefox), funciona
+  direto, sem precisar instalar nada.
+- O aparelho precisa estar com internet no momento do agendamento pra
+  receber na hora (chega depois, assim que reconectar).

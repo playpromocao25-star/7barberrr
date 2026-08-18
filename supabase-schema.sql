@@ -45,3 +45,48 @@ create policy "public all days" on days
 drop policy if exists "public all settings" on settings;
 create policy "public all settings" on settings
   for all using (true) with check (true);
+
+-- ============================================================
+-- PUSH NOTIFICATIONS (pop-up mesmo com o site fechado)
+-- ============================================================
+
+-- Guarda a "inscrição" de push de cada dispositivo do admin
+-- (gerada pelo navegador quando ele clica em "Ativar notificações").
+create table if not exists push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  endpoint text not null unique,
+  subscription jsonb not null,   -- objeto completo devolvido por pushManager.subscribe()
+  created_at timestamptz not null default now()
+);
+
+alter table push_subscriptions enable row level security;
+
+drop policy if exists "public all push_subscriptions" on push_subscriptions;
+create policy "public all push_subscriptions" on push_subscriptions
+  for all using (true) with check (true);
+
+-- Um evento é inserido aqui a cada novo agendamento (pelo navegador do
+-- cliente, no momento em que ele confirma). Um Database Webhook do
+-- Supabase (configurado no painel, aba Database → Webhooks) escuta
+-- INSERT nesta tabela e chama a Edge Function "send-push", que manda
+-- o pop-up de verdade pra todos os dispositivos inscritos em
+-- push_subscriptions — mesmo que o navegador do admin esteja fechado.
+create table if not exists booking_events (
+  id uuid primary key default gen_random_uuid(),
+  iso text not null,
+  time text not null,
+  service_name text,
+  price numeric,
+  client_name text,
+  created_at timestamptz not null default now()
+);
+
+alter table booking_events enable row level security;
+
+drop policy if exists "public insert booking_events" on booking_events;
+create policy "public insert booking_events" on booking_events
+  for insert with check (true);
+
+drop policy if exists "public read booking_events" on booking_events;
+create policy "public read booking_events" on booking_events
+  for select using (true);
