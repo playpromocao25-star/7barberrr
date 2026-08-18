@@ -691,11 +691,20 @@ async function enableBrowserNotify(){
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
       });
     }
-    if(_DB.cloudEnabled() && _Cloud.client){
-      await _Cloud.client.from('push_subscriptions').upsert(
-        { endpoint: sub.endpoint, subscription: sub.toJSON() },
-        { onConflict: 'endpoint' }
-      );
+    if(!_DB.cloudEnabled() || !_Cloud.client){
+      showToast('Sync na nuvem não está ativo — não dá pra salvar a inscrição de push.');
+      render();
+      return;
+    }
+    const { error } = await _Cloud.client.from('push_subscriptions').upsert(
+      { endpoint: sub.endpoint, subscription: sub.toJSON() },
+      { onConflict: 'endpoint' }
+    );
+    if(error){
+      console.error('Falha ao salvar inscrição de push:', error);
+      showToast('Falha ao salvar no servidor: ' + error.message);
+      render();
+      return;
     }
     showToast('Notificações ativadas! Vão chegar mesmo com o site fechado.');
   }catch(e){
